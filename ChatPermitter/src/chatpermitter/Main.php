@@ -2,12 +2,12 @@
 
 namespace chatpermitter;
 
-/* Base */
+/* base */
 use pocketmine\plugin\PluginBase;
-use pocketmine\Server;
 use pocketmine\Player;
+use pocketmine\Server;
 
-/* Event */
+/* event */
 use pocketmine\event\Listener;
 use pocketmine\event\player\PlayerJoinEvent;
 use pocketmine\event\player\PlayerChatEvent;
@@ -16,257 +16,198 @@ use pocketmine\event\server\DataPacketReceiveEvent;
 
 /* scheduler */
 use pocketmine\scheduler\AsyncTask;
-use pocketmine\scheduler\CallbackTask;
 
 /* utils */
 use pocketmine\utils\Config;
+use pocketmine\utils\MainLogger;
 
 /* packet */
 use pocketmine\network\mcpe\protocol\ModalFormRequestPacket;
 use pocketmine\network\mcpe\protocol\ModalFormResponsePacket;
 
-class Main extends PluginBase implements Listener {
+class Main extends PluginBase implements Listener
+{
+	const PLUGIN_NAME = "ChatPermitter";
+	const SELECT_URL = "https://mirm.info/viewkey.php";
+	const DELETE_URL = "https://mirm.info/chat/removekey.php";
+	const DELETE_DAY = 3;
+	const FORM_KEY = 0;
 
-	public function onEnable() {
+	public $users;
+	public $config;
+	public $logger;
+	public $chatUrl;
+	public $deleteUrl;
+	public $deleteDay;
+	public $chatPlayers = [];
+	public $configEnable = false;
 
-		Server::getInstance()->getLogger()->info("[ChatPermitter] > §a読み込み中...");
+	protected static $instance = null;
+
+
+	public static function getInstance()
+	{
+		return self::$instance;
+	}
+
+
+	public function onEnable()
+	{
 		Server::getInstance()->getPluginManager()->registerEvents($this, $this);
 
-		if(!file_exists($this->getDataFolder())) @mkdir($this->getDataFolder(), 0744, true);
-
-		$def_chaturl = "https://mirm.info/viewkey.php";
-		$def_deleteurl = "https://mirm.info/chat/removekey.php";
-		$def_deleteday = 3;
-		$configenable = false;
-
-		global $config_pl, $chaturl, $delete_url, $delete_day, $chatplayers;
-
-		$config_pl = new Config($this->getDataFolder() . "config.yml", Config::YAML,
-			array(
-				"player名" => "日付",
-				"@config_enable" => false,
-				"@chaturl" => $def_chaturl,
-				"@deleteurl" => $def_deleteurl,
-				"@deleteday" => $def_deleteday
-			));
-
-		if($config_pl->exists("@config_enable")){
-			if($config_pl->get("@config_enable" === false)){
-				$configenable = false;
-			}else{
-				$configenable = true;
-			}
-		}else{
-			$configenable = false;
+		if (!file_exists($this->getDataFolder())) {
+			mkdir($this->getDataFolder(), 0744, true);
 		}
 
-		$chaturl = $configenable ? $config_pl->get("@chaturl") : $def_chaturl;
-		$delete_url = $configenable ? $config_pl->get("@deleteurl") : $def_deleteurl;
-		$delete_day = $configenable ? $config_pl->get("@deleteday") : $def_deleteday;
-		$chatplayers = array();
+		$this->users = new DB($this->getDataFolder());
 
-	}
+		$this->config = new Config($this->getDataFolder() . "config.yml", Config::YAML,
+			[
+				"config_enable" => false,
+				"select_url" => self::SELECT_URL,
+				"delete_url" => self::DELETE_URL,
+				"delete_day" => self::DELETE_DAY
+			]);
 
-	public function onJoin(PlayerJoinEvent $event) {
-
-		global $config_pl, $chatplayers, $delete_day;
-
-		$name = $event->getPlayer()->getName();
-
-		if($config_pl->exists($name)){
-			if(time() - $config_pl->get($name) <= $delete_day * 3600 * 24){
-				$chatplayers[$name] = true;
-			}else{
-				$chatplayers[$name] = false;
+		if ($this->config->exists("config_enable")) {
+			if (!$this->config->get("config_enable")) {
+				$this->configEnable = false;
+			} else {
+				$this->configEnable = true;
 			}
-		}else{
-			$chatplayers[$name] = false;
+		} else {
+			$this->configEnable = false;
 		}
+
+		$this->chatUrl   = $this->configEnable ? $this->config->get("select_url")   : self::SELECT_URL;
+		$this->deleteUrl = $this->configEnable ? $this->config->get("delete_url") : self::DELETE_URL;
+		$this->deleteDay = $this->configEnable ? $this->config->get("delete_day") : self::DELETE_DAY;
+
+		self::$instance = $this;
+
+		$this->logger = $this->getLogger();
+		$this->logger->info("§a> Loading...");
 	}
 
-	public function onChat(PlayerChatEvent $event) {
 
-		global $chatplayers, $chaturl, $delete_url;
-
+	public function onJoin(PlayerJoinEvent $event)
+	{
 		$player = $event->getPlayer();
 		$name = $player->getName();
 
-		if(!$chatplayers[$name]){
-			$event->setCancelled(true);
-			Server::Instance()->getLogger()->info($event->getMessage());
-			$this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "mirm"], [$player]), 20); 
+		if ($this->users->isDate($name)) {
+			if (time() - $this->users->getDate($name)["date"] <= $this->deleteDay * 3600 * 24) {
+				$this->chatPlayers[strtolower($name)] = true;
+			} else {
+				$this->chatPlayers[strtolower($name)] = false;
+			}
+		} else {
+			$this->chatPlayers[strtolower($name)] = false;
 		}
 	}
 
-	public function onCmd(PlayerCommandPreprocessEvent $event) {
 
-		global $chaturl, $chatplayers;
+	public function onChat(PlayerChatEvent $event)
+	{
+		$player = $event->getPlayer();
+		$name = $player->getName();
 
+		if (!$this->chatPlayers[strtolower($name)]) {
+			$event->setCancelled(true);
+			$chat = $this->getServer()->getLanguage()->translateString($event->getFormat(), [$player->getDisplayName(), $event->getMessage()]);
+			MainLogger::getLogger()->info($chat);
+			if (strlen($event->getMessage()) === 5) {
+				if (!preg_match("/^[a-zA-Z0-9]+$/", $event->getMessage())) return;
+				$this->getServer()->getScheduler()->scheduleAsyncTask(new Authentication($event->getMessage(), strtolower($name)));
+			} else {
+				$player->sendMessage("§c認証されていないためチャットが利用できません！\n".
+								 	 "§c五文字の認証キーをチャットかダイアログに入力してください！"
+									);
+			}
+		}
+	}
+
+
+	public function onCmd(PlayerCommandPreprocessEvent $event)
+	{
 		$player = $event->getPlayer();
 		$name = $player->getName();
 		$message = $event->getMessage();
 		$command = substr($message, 1);
 		$args = explode(" ", $command);
 
-		switch($args[0]){
+		switch ($args[0]) {
 
 			case "me":
 
-				if(!$chatplayers[$name]){
+				if (!$this->chatPlayers[$name]) {
 					$event->setCancelled(true);
-					$player->sendMessage("[ChatPermitter] > §cこのコマンドを使うには、". $chaturl ."にアクセスして、そこで得たキーをダイアログに入力してください。");
-					$this->getServer()->getScheduler()->scheduleDelayedTask(new CallbackTask([$this, "mirm"], [$player]), 1);
+					$this->sendForm($player);
 				}
+
+				break;
+
+			case "say":
+
+				if (!$this->chatPlayers[$name]) {
+					$event->setCancelled(true);
+					$this->sendForm($player);
+				}
+
+				break;
+		}		
+	}
+
+
+	public function onReceivePacket(DataPacketReceiveEvent $event)
+	{
+		$packet = $event->getPacket();
+		if ($packet instanceof ModalFormResponsePacket) {
+			$player = $event->getPlayer();
+			$name = $player->getName();
+			$formId = (int) $packet->formId;
+			$formData = json_decode($packet->formData);
+
+			if (!isset($player->formId)) return;
+			if (!array_key_exists(self::PLUGIN_NAME, $player->formId)) return;
+			if ($formId === $player->formId[self::PLUGIN_NAME][self::FORM_KEY]) {
+				if (!preg_match("/^[a-zA-Z0-9]+$/", $formData[1])) {
+					unset($player->formId[self::PLUGIN_NAME][self::FORM_KEY]);
+					return;
+				}
+				$this->getServer()->getScheduler()->scheduleAsyncTask(new Authentication($formData[1], strtolower($name)));
+			}
 		}
 	}
 
-	public function mirm(Player $player) {
 
-		global $chaturl, $delete_url;
-
+	/**   API   **/
+	public function sendForm(Player $player)
+	{
 		$data = [
-					"type" => "custom_form",
-					"title" => "§lMiRmチャット認証",
-					"content" => [
-						[
-							"type" => "label",
-							"text" => "§cチャットをするためには認証キーが必要です。\n§c認証キーは{$chaturl}で取得できます。"
-						],
-						[
-							"type" => "input",
-							"text" => "認証キー",
-							"placeholder" => "key"
-						]
-					]
-				];
+			"type" => "custom_form",
+			"title" => "§lMiRmチャット認証",
+			"content" => [
+				[
+					"type" => "label",
+					"text" => "§cチャットをするためには認証キーが必要です。\n".
+							  "§c認証キーは ". $this->chatUrl ." で取得できます！",
+				],
+				[
+					"type" => "input",
+					"text" => "認証キー",
+					"placeholder" => "Authentication key"
+				]
+			]
+		];
 
 		$pk = new ModalFormRequestPacket();
 
-		$pk->formId = 1;
+		$pk->formId = mt_rand(1, 9999999);
 		$pk->formData = json_encode($data);
 
-		$player->dataPacket($player);
+		$player->formId[self::PLUGIN_NAME][self::FORM_KEY] = $pk->formId;
 
-	} 
-
-	public function onReceivePacket(DataPacketReceiveEvent $event) {
-
-		global $chaturl, $delete_url;
-
-		$player = $event->getPlayer();
-		$name = $player->getName();
-		$packet = $event->getPacket();
-
-		if($packet instanceof ModalFormResponsePacket){
-			$formid = $packet->formId;
-			$formdata = $packet->formData;
-
-			switch($id){
-
-				case 1:
-
-					$Fdata = json_decode($data, true);
-
-					if($Fdata === null){
-
-						break;
-
-					}elseif($Fdata[1] === ""){
-
-						$player->sendMessage("[ChatPermitter] > §c認証キーを入力してください！");
-						$this->mirm($player);
-
-						break;
-
-					}
-
-					$key = preg_replace('/[^a-z]/', '', $Fdata[1]);
-
-					$this->getServer()->getScheduler()->scheduleAsyncTask($job4 = new thread_getdata($key, $name, $delete_url));
-
-					break;
-			}
-		}
+		$player->dataPacket($pk);		
 	}
-}
-
-class thread_getdata extends AsyncTask {
-
-	public function __construct($key, $player, $delete_url) {
-
-		$this->code = $key;
-		$this->player = $player;
-		$this->delete_url = $delete_url;
-
-	}
-
-	public function onRun() {
-
-		$re = array();
-		$re["playername"] = $this->player;
-
-		$base_url = $this->delete_url;
-
-		$curl = curl_init();
-
-		curl_setopt($curl, CURLOPT_URL, $base_url .'?key='. $this->code);
-		curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'GET');
-		curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, false);
-		curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-		curl_setopt($curl, CURLOPT_HEADER, false);
-
-		$response = curl_exec($curl);
-
-		$code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-
-		if(is_numeric($response)){
-			if($response = 0){
-				$re["result"] = false;
-			}else{
-				$re["result"] = true;
-			}
-		}else{
-			$re["result"] = true;
-
-			echo "Error Occured : ". PHP_EOL;
-			echo $response . PHP_EOL;
-			echo $code . PHP_EOL;
-		}
-
-		curl_close($curl);
-
-		$this->setResult($re);
-	}
-
-	public function onCompletion(Server $server) {
-
-		global $chatplayers, $config_pl;
-
-		$re = $this->getResult();
-		$pl = $re["playername"];
-
-		if($server->getPlayer($pl) !== null){
-			$player = $server->getPlayer($pl);
-			$name = $player->getName();
-			if($re["result"]){
-				$chatplayers[$name] = true;
-				if($config_pl->exists($name)){
-					$config_pl->remove($name);
-				}
-
-				$config_pl->set($name, time());
-				$config_pl->save();
-
-				$player->sendMessage("[ChatPermitter] > §aコードが認証されました！");
-			}else{
-				$player->sendMessage("[ChatPermitter] > §cコードが間違っているはずです！");
-			}
-		}
-	}
-}
-
-class ResultSet {
-
-	public $player, $result;
-
 }
